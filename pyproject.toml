@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "safe-bulk-rename-planner"
+version = "1.0.0"
+description = "Preview collision-safe filename changes and produce a reversible rename manifest."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Logan Pendragon Multiverse" }]
+keywords = ["rename", "files", "preview", "undo", "safety"]
+
+[project.scripts]
+rename-plan = "rename_planner.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/loganpendragonmultiverse/safe-bulk-rename-planner"
+Issues = "https://github.com/loganpendragonmultiverse/safe-bulk-rename-planner/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rename_planner"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
