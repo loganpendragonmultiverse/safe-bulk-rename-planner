@@ -4,9 +4,13 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
+
+from .review import save_journal
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,10 +33,23 @@ class Plan:
     renames: tuple[Rename, ...]
 
     def to_dict(self) -> dict[str, object]:
-        return {"schema_version": 1, "root": self.root, "pattern": self.pattern, "replacement": self.replacement, "recursive": self.recursive, "renames": [item.to_dict() for item in self.renames]}
+        return {
+            "schema_version": 1,
+            "root": self.root,
+            "pattern": self.pattern,
+            "replacement": self.replacement,
+            "recursive": self.recursive,
+            "renames": [item.to_dict() for item in self.renames],
+        }
 
 
-def create_plan(root: Path, pattern: str, replacement: str, recursive: bool = False) -> Plan:
+def create_plan(
+    root: Path,
+    pattern: str,
+    replacement: str,
+    recursive: bool = False,
+    exclude: tuple[str, ...] = (),
+) -> Plan:
     directory = root.expanduser().resolve()
     if not directory.is_dir():
         raise ValueError(f"Not a directory: {directory}")
@@ -41,16 +58,36 @@ def create_plan(root: Path, pattern: str, replacement: str, recursive: bool = Fa
     except re.error as exc:
         raise ValueError(f"Invalid match expression: {exc}") from exc
     candidates = directory.rglob("*") if recursive else directory.iterdir()
-    files = sorted((path for path in candidates if path.is_file() and not path.is_symlink()), key=lambda path: str(path.relative_to(directory)).casefold())
+    files = sorted(
+        (path for path in candidates if path.is_file() and not path.is_symlink()),
+        key=lambda path: str(path.relative_to(directory)).casefold(),
+    )
     renames: list[Rename] = []
     for source in files:
+        if _relative(directory, source) in exclude:
+            continue
         new_name = expression.sub(replacement, source.name)
         if new_name == source.name:
             continue
-        if not new_name or new_name in {".", ".."} or Path(new_name).name != new_name or "/" in new_name or "\\" in new_name:
-            raise ValueError(f"Replacement creates an unsafe filename for {source.name!r}: {new_name!r}")
+        if (
+            not new_name
+            or new_name in {".", ".."}
+            or Path(new_name).name != new_name
+            or "/" in new_name
+            or "\\" in new_name
+        ):
+            raise ValueError(
+                f"Replacement creates an unsafe filename for {source.name!r}: {new_name!r}"
+            )
         target = source.with_name(new_name)
-        renames.append(Rename(_relative(directory, source), _relative(directory, target), source.stat().st_size, _sha256(source)))
+        renames.append(
+            Rename(
+                _relative(directory, source),
+                _relative(directory, target),
+                source.stat().st_size,
+                _sha256(source),
+            )
+        )
     _validate_collisions(directory, renames)
     return Plan(str(directory), pattern, replacement, recursive, tuple(renames))
 
@@ -58,53 +95,120 @@ def create_plan(root: Path, pattern: str, replacement: str, recursive: bool = Fa
 def write_manifest(plan: Plan, output: Path) -> None:
     destination = output.expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8")
+    if destination.exists():
+        raise ValueError("manifest output already exists")
+    destination.write_text(
+        json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def load_manifest(path: Path) -> Plan:
     source = path.expanduser().resolve()
     payload = json.loads(source.read_text(encoding="utf-8-sig"))
-    if payload.get("schema_version") != 1 or not isinstance(payload.get("renames"), list):
+    if payload.get("schema_version") != 1 or not isinstance(
+        payload.get("renames"), list
+    ):
         raise ValueError("Unsupported or invalid rename manifest")
-    renames = tuple(Rename(str(item["source"]), str(item["target"]), int(item["size"]), str(item["sha256"])) for item in payload["renames"])
-    return Plan(str(payload["root"]), str(payload.get("pattern", "")), str(payload.get("replacement", "")), bool(payload.get("recursive")), renames)
+    renames = tuple(
+        Rename(
+            str(item["source"]),
+            str(item["target"]),
+            int(item["size"]),
+            str(item["sha256"]),
+        )
+        for item in payload["renames"]
+    )
+    return Plan(
+        str(payload["root"]),
+        str(payload.get("pattern", "")),
+        str(payload.get("replacement", "")),
+        bool(payload.get("recursive")),
+        renames,
+    )
 
 
-def apply_plan(plan: Plan) -> None:
-    _execute(plan, undo=False)
+def apply_plan(plan: Plan, journal: Path | None = None) -> None:
+    _execute(plan, undo=False, journal=journal)
 
 
-def undo_plan(plan: Plan) -> None:
-    _execute(plan, undo=True)
+def undo_plan(plan: Plan, journal: Path | None = None) -> None:
+    _execute(plan, undo=True, journal=journal)
 
 
-def _execute(plan: Plan, undo: bool) -> None:
+def _execute(plan: Plan, undo: bool, journal: Path | None = None) -> None:
     root = Path(plan.root).resolve()
     if not root.is_dir():
         raise ValueError(f"Manifest root is not a directory: {root}")
-    operations = [(item.target, item.source, item) if undo else (item.source, item.target, item) for item in plan.renames]
+    operations = [
+        (item.target, item.source, item) if undo else (item.source, item.target, item)
+        for item in plan.renames
+    ]
+    _validate_collisions(
+        root, [Rename(a, b, item.size, item.sha256) for a, b, item in operations]
+    )
     occupied_sources = {source.casefold() for source, _, _ in operations}
     for source_name, target_name, item in operations:
         source = _inside(root, source_name)
         target = _inside(root, target_name)
+        if source.parent != target.parent:
+            raise ValueError("Renames must preserve each file's original directory")
         if not source.is_file() or source.is_symlink():
-            raise ValueError(f"Expected source file is missing or unsafe: {source_name}")
+            raise ValueError(
+                f"Expected source file is missing or unsafe: {source_name}"
+            )
         if source.stat().st_size != item.size or _sha256(source) != item.sha256:
             raise ValueError(f"File changed since the plan was created: {source_name}")
         if target.exists() and target_name.casefold() not in occupied_sources:
             raise ValueError(f"Target already exists: {target_name}")
 
+    journal_data: dict[str, Any] = {
+        "tool": "safe-bulk-rename-planner",
+        "schema_version": 1,
+        "root": str(root),
+        "status": "prepared",
+        "undo": undo,
+        "operations": [
+            {
+                "source": source,
+                "target": target,
+                "temporary": str(
+                    Path(source).with_name(f".rename-planner-{uuid.uuid4().hex}.tmp")
+                ),
+                "size": item.size,
+                "sha256": item.sha256,
+                "phase": "pending",
+            }
+            for source, target, item in operations
+        ],
+    }
+    if journal:
+        if journal.resolve() in {
+            _inside(root, n) for a, b, _ in operations for n in (a, b)
+        }:
+            raise ValueError("journal must not replace any source or target")
+        save_journal(journal, journal_data, initial=True)
     staged: list[tuple[Path, Path, Path]] = []
     try:
         for index, (source_name, target_name, _) in enumerate(operations):
             source = _inside(root, source_name)
             target = _inside(root, target_name)
-            temporary = source.with_name(f".rename-planner-{uuid.uuid4().hex}-{index}.tmp")
+            temporary = _inside(root, journal_data["operations"][index]["temporary"])
             os.replace(source, temporary)
             staged.append((temporary, target, source))
-        for temporary, target, _ in staged:
+            journal_data["operations"][index]["phase"] = "staged"
+            if journal:
+                save_journal(journal, journal_data)
+        for index, (temporary, target, _) in enumerate(staged):
+            if target.exists():
+                raise ValueError(f"Target appeared during staging: {target.name}")
             os.replace(temporary, target)
-    except OSError:
+            journal_data["operations"][index]["phase"] = "committed"
+            if journal:
+                save_journal(journal, journal_data)
+        journal_data["status"] = "complete"
+        if journal:
+            save_journal(journal, journal_data)
+    except (OSError, ValueError):
         for temporary, target, original in reversed(staged):
             current = temporary if temporary.exists() else target
             if current.exists() and not original.exists():
@@ -113,14 +217,26 @@ def _execute(plan: Plan, undo: bool) -> None:
 
 
 def _validate_collisions(root: Path, renames: list[Rename]) -> None:
-    source_keys = {item.source.casefold() for item in renames}
+    source_keys = {
+        unicodedata.normalize("NFC", item.source).casefold() for item in renames
+    }
+    if len(source_keys) != len(renames):
+        raise ValueError("Source names collide under Unicode NFC and case folding")
     target_keys: set[str] = set()
     for item in renames:
-        key = item.target.casefold()
+        key = unicodedata.normalize("NFC", item.target).casefold()
         if key in target_keys:
             raise ValueError(f"Multiple files would be renamed to {item.target}")
         target_keys.add(key)
         target = _inside(root, item.target)
+        for existing in target.parent.iterdir():
+            existing_key = unicodedata.normalize(
+                "NFC", _relative(root, existing)
+            ).casefold()
+            if existing_key == key and key not in source_keys:
+                raise ValueError(
+                    f"Target already exists (Unicode/case collision): {item.target}"
+                )
         if target.exists() and key not in source_keys:
             raise ValueError(f"Target already exists: {item.target}")
 
