@@ -53,3 +53,13 @@ Released under the [MIT License](LICENSE). Contributions follow the [organizatio
 ## More open-source projects
 
 This project is part of the [Logan Pendragon Forge open-source collection](https://www.loganpendragonforge.com/open-source/). Browse the catalog for other released tools, source repositories, live demos, and downloads.
+
+## Version 1.1.0: reviewed improvements
+
+Repair formatting and add visual per-file selection, Unicode/case collision review, interruption journals and read-only recovery inspection.
+
+```bash
+rename-plan ./files --match ' ' --replace '-' --output plan.json --html review.html
+```
+
+--exclude omits an exact relative source name. The local HTML review can uncheck files and download a selected manifest; --apply-manifest applies that reviewed input only after fresh collision and content-hash checks. Unicode NFC/case-fold collisions are rejected and original directories are preserved. CLI apply/undo creates a new journal beside the manifest, or uses --journal with a new path. The journal records every planned temporary path before changes and advances after staging/commit. --inspect-recovery JOURNAL compares current source/temporary/target hashes without moving anything, including a crash between a move and its journal update. Interrupted recovery remains an explicit human-reviewed operation. Existing manifests/reports/journals are protected.

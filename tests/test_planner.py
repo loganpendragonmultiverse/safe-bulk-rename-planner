@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from rename_planner.planner import apply_plan, create_plan, load_manifest, undo_plan, write_manifest
+from rename_planner.planner import (
+    apply_plan,
+    create_plan,
+    load_manifest,
+    undo_plan,
+    write_manifest,
+)
 
 
 def test_preview_does_not_rename_files(tmp_path: Path) -> None:
