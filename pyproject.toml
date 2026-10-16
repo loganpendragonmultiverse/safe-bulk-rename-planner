@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "safe-bulk-rename-planner"
-version = "1.1.0"
+version = "1.1.1"
 description = "Preview collision-safe filename changes and produce a reversible rename manifest."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,3 +25,9 @@ packages = ["src/rename_planner"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.hatch.build.targets.wheel.shared-data]
+"README.md" = "share/doc/safe-bulk-rename-planner/README.md"
+"CHANGELOG.md" = "share/doc/safe-bulk-rename-planner/CHANGELOG.md"
+"DEVELOPMENT.md" = "share/doc/safe-bulk-rename-planner/DEVELOPMENT.md"
+"TESTING.md" = "share/doc/safe-bulk-rename-planner/TESTING.md"

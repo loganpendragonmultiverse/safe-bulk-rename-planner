@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-import rename_planner.planner as planner
+from rename_planner import planner
 from rename_planner.cli import main
 from rename_planner.review import inspect_journal, render_html
 
