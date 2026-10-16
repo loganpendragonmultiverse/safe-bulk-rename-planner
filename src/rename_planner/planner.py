@@ -136,6 +136,7 @@ def undo_plan(plan: Plan, journal: Path | None = None) -> None:
 
 
 def _execute(plan: Plan, undo: bool, journal: Path | None = None) -> None:
+    _reject_symlinks(Path(plan.root).absolute())
     root = Path(plan.root).resolve()
     if not root.is_dir():
         raise ValueError(f"Manifest root is not a directory: {root}")
@@ -241,8 +242,16 @@ def _validate_collisions(root: Path, renames: list[Rename]) -> None:
             raise ValueError(f"Target already exists: {item.target}")
 
 
+def _reject_symlinks(path: Path) -> None:
+    # Inspect the supplied spelling before resolve() can erase symlink evidence.
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ValueError("Manifest paths must not use a symlink or symlink ancestor")
+
+
 def _inside(root: Path, relative: str) -> Path:
-    target = (root / relative).resolve()
+    lexical = root / relative
+    _reject_symlinks(lexical)
+    target = lexical.resolve()
     if target != root and root not in target.parents:
         raise ValueError(f"Manifest path leaves its root: {relative}")
     return target
