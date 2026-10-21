@@ -316,3 +316,22 @@ def test_initial_journal_limit_does_not_rename_sources(tmp_path, monkeypatch):
         planner.apply_plan(plan, journal)
     assert source.read_bytes() == b"source"
     assert not journal.exists() and not (tmp_path / "a-file.txt").exists()
+
+
+def test_containment_resolution_preserves_requested_target_spelling(
+    tmp_path, monkeypatch
+):
+    from rename_planner.safety import inside
+
+    (tmp_path / "name.txt").write_bytes(b"source")
+    original = type(tmp_path).resolve
+
+    def canonical_existing_spelling(path, *args, **kwargs):
+        if path.parent == tmp_path and path.name == "NAME.txt":
+            return tmp_path / "name.txt"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(tmp_path), "resolve", canonical_existing_spelling)
+    target = inside(tmp_path, "NAME.txt")
+    assert target.name == "NAME.txt"
+    assert target.parent == tmp_path

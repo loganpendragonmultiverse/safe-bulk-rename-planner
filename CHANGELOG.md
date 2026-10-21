@@ -2,6 +2,7 @@
 
 ## [1.1.2] - 2026-10-21
 
+- Preserve requested case-only rename spelling after containment verification on Windows.
 - Validate typed manifests/journals and portable destinations, refuse reparse ancestors and protect report/manifest outputs with exclusive creation.
 - Recheck source/staged content and refuse occupied temporary paths. Repair caught-failure rollback for partial rename cycles and record interrupted/rolled-back status truthfully.
 - Bind hashing metadata within each OS API, retain all original regressions and add real native link/junction/case fixtures.

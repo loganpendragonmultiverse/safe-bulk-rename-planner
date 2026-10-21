@@ -51,7 +51,9 @@ def inside(root: Path, relative: Any) -> Path:
     target = lexical.resolve()
     if root not in target.parents:
         raise ValueError("Manifest path leaves its root")
-    return target
+    # Resolution proves containment, but on Windows it may adopt the spelling
+    # of an existing case-insensitive match. Keep the requested rename spelling.
+    return lexical
 
 
 def portable_target(name: str) -> None:
