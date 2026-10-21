@@ -21,3 +21,7 @@ Imported manifest paths are inspected in their lexical spelling before resolutio
 Preserve original tests and all protected checks. Same-file metadata comparisons use each API's own snapshots; cross-API identity and complete streamed hashes remain required. Never overwrite an occupied temporary path or restore unverified contents. Caught-error rollback stages committed targets before originals, preserving cycles. Uncaught termination remains explicit read-only inspection, not automatic recovery. Journal states must describe actual completion or incomplete rollback. All output pairs are preflighted and new reports/manifests use exclusive creation.
 
 There was no pre-existing numeric coverage gate; run supplementary branch coverage to inspect meaningful missing behavior without replacing the original complete test command. Actual installed Windows junction/symlink/case execution remains mandatory before release; platform skips are not native acceptance.
+
+## 1.1.3 release identity checks
+
+Release packaging compares runtime AST, project/tag version, and built wheel METADATA/source PKG-INFO Name, Version and Requires-Python before checksumming exactly two distributions. Run the packaging helper with Python 3.11+; supported application runtimes and native acceptance requirements are unchanged.

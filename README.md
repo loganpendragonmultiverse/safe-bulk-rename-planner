@@ -79,3 +79,7 @@ Staging paths must be unused, and source and staged hashes are checked again bef
 Keep selected trees quiescent and retain the reviewed manifest/journal. These checks do not provide transactional filesystem snapshots, hostile-concurrency protection, hardware-failure recovery or automatic post-crash repair. No file contents are edited. Actual installed Windows link/junction/case acceptance and independent tagged-artifact review are release gates, separate from candidate source tests.
 
 The unchanged six OS/Python3.10/3.13 runtime jobs feed the required `verify` job, which also runs formatting, lint, strict typing and dependency audit. Tag builds repeat quality/tests and produce wheel, sdist and exact two-payload `SHA256SUMS`; the checksum helper runs on the existing Python3.12 release environment. No runtime dependency or Python-floor migration is included.
+
+## 1.1.3 release identity checks
+
+Release packaging compares runtime AST, project/tag version, and built wheel METADATA/source PKG-INFO Name, Version and Requires-Python before checksumming exactly two distributions. Run the packaging helper with Python 3.11+; supported application runtimes and native acceptance requirements are unchanged.
