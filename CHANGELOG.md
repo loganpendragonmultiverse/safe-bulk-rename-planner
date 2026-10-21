@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2] - 2026-10-21
+
+- Validate typed manifests/journals and portable destinations, refuse reparse ancestors and protect report/manifest outputs with exclusive creation.
+- Recheck source/staged content and refuse occupied temporary paths. Repair caught-failure rollback for partial rename cycles and record interrupted/rolled-back status truthfully.
+- Bind hashing metadata within each OS API, retain all original regressions and add real native link/junction/case fixtures.
+- Ship complete authority docs, license and an executable example with both distributions.
+
 ## [1.1.1] - 2026-10-16
 
 Imported manifest paths are inspected in their lexical spelling before resolution. A symlink at a source, destination, root or ancestor is rejected before any rename or journal write. Containment, original-directory, Unicode/case collision, size and SHA-256 checks still apply. Normal apply/undo and read-only interruption inspection remain available. Use disposable trees for tests. Concurrent filesystem replacement remains outside the guarantee; this check does not make renames atomic or provide automatic recovery.

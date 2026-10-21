@@ -15,3 +15,9 @@ Local formatting, lint, strict types and regression tests pass. Public release c
 ## 1.1.1 — 2026-10-16
 
 Imported manifest paths are inspected in their lexical spelling before resolution. A symlink at a source, destination, root or ancestor is rejected before any rename or journal write. Containment, original-directory, Unicode/case collision, size and SHA-256 checks still apply. Normal apply/undo and read-only interruption inspection remain available. Use disposable trees for tests. Concurrent filesystem replacement remains outside the guarantee; this check does not make renames atomic or provide automatic recovery.
+
+## 1.1.2 contract
+
+Preserve original tests and all protected checks. Same-file metadata comparisons use each API's own snapshots; cross-API identity and complete streamed hashes remain required. Never overwrite an occupied temporary path or restore unverified contents. Caught-error rollback stages committed targets before originals, preserving cycles. Uncaught termination remains explicit read-only inspection, not automatic recovery. Journal states must describe actual completion or incomplete rollback. All output pairs are preflighted and new reports/manifests use exclusive creation.
+
+There was no pre-existing numeric coverage gate; run supplementary branch coverage to inspect meaningful missing behavior without replacing the original complete test command. Actual installed Windows junction/symlink/case execution remains mandatory before release; platform skips are not native acceptance.

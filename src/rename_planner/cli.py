@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .planner import apply_plan, create_plan, load_manifest, undo_plan, write_manifest
 from .review import inspect_journal, render_html
+from .safety import destination, no_links
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,6 +45,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--html", type=Path, help="New visual review file")
     args = parser.parse_args(argv)
     try:
+        modes = sum(
+            bool(value)
+            for value in (
+                args.inspect_recovery,
+                args.apply_manifest,
+                args.undo,
+                args.directory,
+            )
+        )
+        if modes != 1:
+            raise ValueError("Choose one preview, apply-manifest, undo or inspect mode")
+        if not args.directory and (
+            args.output
+            or args.html
+            or args.recursive
+            or args.exclude
+            or args.match is not None
+            or args.replace is not None
+            or args.apply
+        ):
+            raise ValueError("Preview arguments cannot be used with another mode")
+        if args.inspect_recovery and args.journal:
+            raise ValueError("Inspection cannot write a journal")
+        if args.directory and args.journal and not args.apply:
+            raise ValueError("--journal requires an apply or undo operation")
         if args.inspect_recovery:
             print(json.dumps(inspect_journal(args.inspect_recovery), indent=2))
             return 0
@@ -68,14 +94,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.apply and not args.output:
             parser.error("--apply requires --output so the undo manifest is retained")
-        if args.html and (
-            args.html.exists()
-            or args.output
-            and args.html.resolve() == args.output.resolve()
-        ):
-            raise ValueError(
-                "HTML review must be a new file distinct from the manifest"
-            )
+        output = destination(args.output) if args.output else None
+        html = destination(args.html) if args.html else None
+        journal = (
+            destination(args.journal or Path(str(args.output) + ".journal.json"))
+            if args.apply
+            else None
+        )
+        selected = [path for path in (output, html, journal) if path is not None]
+        if len(set(selected)) != len(selected):
+            raise ValueError("Manifest, HTML and journal outputs must be distinct")
         plan = create_plan(
             args.directory,
             args.match,
@@ -83,13 +111,16 @@ def main(argv: list[str] | None = None) -> int:
             args.recursive,
             tuple(args.exclude),
         )
-        if args.output:
-            write_manifest(plan, args.output)
-        if args.html:
-            args.html.write_text(render_html(plan.to_dict()), encoding="utf-8")
+        if output:
+            write_manifest(plan, output)
+        if html:
+            html.parent.mkdir(parents=True, exist_ok=True)
+            no_links(html)
+            with html.open("x", encoding="utf-8") as stream:
+                stream.write(render_html(plan.to_dict()))
         print(json.dumps(plan.to_dict(), indent=2))
         if args.apply:
-            apply_plan(plan, args.journal or Path(str(args.output) + ".journal.json"))
+            apply_plan(plan, journal)
             print(
                 f"Applied {len(plan.renames)} rename(s). Undo with: rename-plan --undo {args.output}"
             )
@@ -99,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
         return 0
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, TypeError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         print(f"rename-plan: {exc}", file=sys.stderr)
         return 2
 

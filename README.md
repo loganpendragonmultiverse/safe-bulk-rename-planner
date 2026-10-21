@@ -39,14 +39,14 @@ Preview is the default. `--apply` is refused without an output manifest. The pla
 ## Development
 
 ```bash
-python -m pip install -e . pytest build
+python -m pip install -e ".[dev]"
 python -m pytest
 python -m build
 ```
 
 ## Project status
 
-**Feature complete for v1.0.** Focused contributions that preserve preview-first behavior and reversibility are welcome.
+**Focused release scope:** preview, reviewed apply/undo and read-only interruption inspection. Focused contributions that preserve preview-first behavior and reversibility are welcome.
 
 Released under the [MIT License](LICENSE). Contributions follow the [organization guidelines](https://github.com/loganpendragonmultiverse/.github/blob/main/CONTRIBUTING.md).
 
@@ -67,3 +67,15 @@ rename-plan ./files --match ' ' --replace '-' --output plan.json --html review.h
 ## 1.1.1 — 2026-10-16
 
 Imported manifest paths are inspected in their lexical spelling before resolution. A symlink at a source, destination, root or ancestor is rejected before any rename or journal write. Containment, original-directory, Unicode/case collision, size and SHA-256 checks still apply. Normal apply/undo and read-only interruption inspection remain available. Use disposable trees for tests. Concurrent filesystem replacement remains outside the guarantee; this check does not make renames atomic or provide automatic recovery.
+
+## 1.1.2 — typed evidence and interruption handling
+
+Manifests and journals validate typed integer versions, booleans, nonnegative sizes, lowercase SHA-256, portable relative paths and bounded record counts before file operations. JSON inputs and generated manifests/journals are limited to 8 MiB; plans observe at most 10,000 regular candidate files. Duplicate JSON keys and non-finite constant tokens are rejected. Files are hashed in streaming blocks, and descriptor/path metadata must remain stable within each API. Windows path/descriptor creation-time representations are not incorrectly compared to each other.
+
+Preview skips symbolic links and Windows junction/reparse entries before traversing them. Selected roots, imported source/target paths, manifests, reports, journals and their linked ancestors are refused. Names reserved by Windows, alternate-stream separators and trailing dots/spaces are rejected on every platform. Invalid replacement groups produce an actionable CLI error. All destinations are preflighted before normal output creation; existing outputs and dangling links are refused using exclusive creation. An output error can leave a new manifest or report; inspect it and retry with fresh names.
+
+Staging paths must be unused, and source and staged hashes are checked again before their moves. Ordinary caught I/O failures attempt a two-phase, content-checked rollback: committed targets first return to their recorded staging names, then originals are restored. This avoids a partially committed cycle blocking another original. Journals distinguish `rolled-back` from `interrupted`; a failed rollback preserves remaining data for inspection. Abrupt process termination can leave earlier journal phases, so read-only inspection compares actual hashes and never moves files. Case aliases or duplicate matching contents can require human review. Do not apply an undo manifest until the original operation completed.
+
+Keep selected trees quiescent and retain the reviewed manifest/journal. These checks do not provide transactional filesystem snapshots, hostile-concurrency protection, hardware-failure recovery or automatic post-crash repair. No file contents are edited. Actual installed Windows link/junction/case acceptance and independent tagged-artifact review are release gates, separate from candidate source tests.
+
+The unchanged six OS/Python3.10/3.13 runtime jobs feed the required `verify` job, which also runs formatting, lint, strict typing and dependency audit. Tag builds repeat quality/tests and produce wheel, sdist and exact two-payload `SHA256SUMS`; the checksum helper runs on the existing Python3.12 release environment. No runtime dependency or Python-floor migration is included.
