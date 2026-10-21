@@ -2,23 +2,38 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
 
+from .safety import (
+    MAX_JSON,
+    MAX_RECORDS,
+    hash_file,
+    inside,
+    no_links,
+    read_json,
+    typed_record,
+)
+
 
 def save_journal(path: Path, payload: dict[str, Any], *, initial: bool = False) -> None:
+    path = no_links(path).resolve()
+    content = json.dumps(payload, indent=2)
+    if len(content.encode("utf-8")) > MAX_JSON:
+        raise ValueError("Serialized journal exceeds 8 MiB")
     if initial:
         with path.open("x", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+            handle.write(content)
         return
+    if not path.is_file():
+        raise ValueError("Existing journal is missing or not a regular file")
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=path.parent, delete=False
     ) as handle:
-        json.dump(payload, handle, indent=2)
+        handle.write(content)
         temporary = Path(handle.name)
     try:
         os.replace(temporary, path)
@@ -27,31 +42,63 @@ def save_journal(path: Path, payload: dict[str, Any], *, initial: bool = False) 
 
 
 def inspect_journal(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = read_json(path)
     if (
         not isinstance(payload, dict)
         or payload.get("tool") != "safe-bulk-rename-planner"
         or not isinstance(payload.get("operations"), list)
     ):
         raise ValueError("Invalid rename journal")
-    root = Path(payload["root"]).resolve()
-    inspections = []
+    if (
+        not isinstance(payload.get("root"), str)
+        or not Path(payload["root"]).is_absolute()
+    ):
+        raise ValueError("Journal root must be an absolute local directory")
+    root = no_links(Path(payload["root"])).resolve()
+    if not root.is_dir() or len(payload["operations"]) > MAX_RECORDS:
+        raise ValueError("Invalid journal root or excessive operation count")
+    # Containment is checked even for malformed legacy records, before any read.
     for item in payload["operations"]:
+        if not isinstance(item, dict):
+            raise TypeError("Journal operations must be objects")
+        for key in ("source", "temporary", "target"):
+            inside(root, item.get(key))
+    if (
+        type(payload.get("schema_version")) is not int
+        or payload["schema_version"] != 1
+        or type(payload.get("undo")) is not bool
+        or payload.get("status")
+        not in {"prepared", "complete", "rolled-back", "interrupted"}
+    ):
+        raise ValueError("Unsupported journal schema, status or undo flag")
+    inspections = []
+    sources: set[str] = set()
+    targets: set[str] = set()
+    temporaries: set[str] = set()
+    for item in payload["operations"]:
+        typed_record(item, ("source", "temporary", "target"))
+        if item.get("phase") not in {"pending", "staged", "committed", "rolled-back"}:
+            raise ValueError("Invalid journal operation phase")
+        if (
+            Path(item["source"]).parent != Path(item["target"]).parent
+            or Path(item["source"]).parent != Path(item["temporary"]).parent
+        ):
+            raise ValueError("Journal paths must preserve their original directory")
+        for key, seen in (
+            ("source", sources),
+            ("target", targets),
+            ("temporary", temporaries),
+        ):
+            if item[key] in seen:
+                raise ValueError("Duplicate journal paths")
+            seen.add(item[key])
         locations = []
         for key in ("source", "temporary", "target"):
-            location = (root / item[key]).resolve()
-            if root not in location.parents:
-                raise ValueError("Journal path leaves the original root")
-            matches = False
-            if location.is_file() and not location.is_symlink():
-                digest = hashlib.sha256()
-                with location.open("rb") as source:
-                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                matches = (
-                    location.stat().st_size == item["size"]
-                    and digest.hexdigest() == item["sha256"]
-                )
+            location = inside(root, item[key])
+            matches = location.is_file() and hash_file(location) == (
+                item["size"],
+                item["sha256"],
+            )
             locations.append(
                 {
                     "location": key,
@@ -68,8 +115,10 @@ def inspect_journal(path: Path) -> dict[str, Any]:
                 != 1,
             }
         )
+    if temporaries & (sources | targets):
+        raise ValueError("Temporary journal paths overlap sources or targets")
     return {
-        "recorded_status": payload.get("status"),
+        "recorded_status": payload["status"],
         "operations": inspections,
         "boundary": "Inspection only. Crash windows are resolved from current hashes; no recovery rename is performed.",
     }
@@ -79,7 +128,7 @@ def render_html(plan: dict[str, Any]) -> str:
     payload = json.dumps(plan).replace("<", "\\u003c").replace("&", "\\u0026")
     return (
         """<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Rename plan review</title>
-<style>body{font:17px system-ui;max-width:1050px;margin:auto;padding:22px;background:#f5f1e8;color:#203442}article{background:white;padding:20px;border:1px solid #abc;border-radius:12px;margin:15px 0}p{overflow-wrap:anywhere}button,input{font:inherit;padding:10px}</style>
+<style>body{font:17px system-ui;max-width:1050px;margin:auto;padding:22px;background:#f5f1e8;color:#203442}article{background:white;padding:20px;border:1px solid #abc;border-radius:12px;margin:15px 0}p,label{overflow-wrap:anywhere}article{min-width:0}button,input{font:inherit;padding:10px}</style>
 <h1>Rename plan review</h1><p>Review original and proposed names. Uncheck files to omit them and download a new manifest. Nothing is renamed in this page. Unicode NFC and case-fold collisions are rejected by the CLI; case-only renames use temporary staging.</p><main id="rows"></main><button id="download">Download selected manifest</button><p id="status" role="status"></p>
 <script type="application/json" id="data">"""
         + payload

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
+import stat
 import unicodedata
 import uuid
 from dataclasses import asdict, dataclass
@@ -11,6 +11,18 @@ from pathlib import Path
 from typing import Any
 
 from .review import save_journal
+from .safety import (
+    MAX_JSON,
+    MAX_RECORDS,
+    destination,
+    hash_file,
+    inside,
+    no_links,
+    portable_target,
+    read_json,
+    relative_name,
+    typed_record,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,81 +62,141 @@ def create_plan(
     recursive: bool = False,
     exclude: tuple[str, ...] = (),
 ) -> Plan:
-    directory = root.expanduser().resolve()
+    if (
+        type(recursive) is not bool
+        or not isinstance(exclude, tuple)
+        or any(not isinstance(name, str) for name in exclude)
+    ):
+        raise ValueError(
+            "recursive must be boolean and exclude must be a tuple of relative names"
+        )
+    for name in exclude:
+        relative_name(name)
+    directory = no_links(root).resolve()
     if not directory.is_dir():
         raise ValueError(f"Not a directory: {directory}")
     try:
         expression = re.compile(pattern)
     except re.error as exc:
         raise ValueError(f"Invalid match expression: {exc}") from exc
-    candidates = directory.rglob("*") if recursive else directory.iterdir()
-    files = sorted(
-        (path for path in candidates if path.is_file() and not path.is_symlink()),
-        key=lambda path: str(path.relative_to(directory)).casefold(),
-    )
+    files: list[Path] = []
+    stack = [directory]
+    while stack:
+        current = stack.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                metadata = entry.stat(follow_symlinks=False)
+                if (
+                    stat.S_ISLNK(metadata.st_mode)
+                    or getattr(metadata, "st_file_attributes", 0) & 0x400
+                ):
+                    continue
+                path = Path(entry.path)
+                if stat.S_ISDIR(metadata.st_mode):
+                    if recursive:
+                        stack.append(path)
+                elif stat.S_ISREG(metadata.st_mode):
+                    files.append(path)
+                    if len(files) > MAX_RECORDS:
+                        raise ValueError("Plan exceeds 10,000 candidate files")
+                else:
+                    raise ValueError("Only regular files can be planned")
+    files.sort(key=lambda path: str(path.relative_to(directory)).casefold())
     renames: list[Rename] = []
     for source in files:
         if _relative(directory, source) in exclude:
             continue
-        new_name = expression.sub(replacement, source.name)
+        try:
+            new_name = expression.sub(replacement, source.name)
+        except (re.error, IndexError) as error:
+            raise ValueError(f"Invalid replacement expression: {error}") from error
         if new_name == source.name:
             continue
-        if (
-            not new_name
-            or new_name in {".", ".."}
-            or Path(new_name).name != new_name
-            or "/" in new_name
-            or "\\" in new_name
-        ):
-            raise ValueError(
-                f"Replacement creates an unsafe filename for {source.name!r}: {new_name!r}"
-            )
+        portable_target(new_name)
         target = source.with_name(new_name)
+        size, digest = hash_file(source)
         renames.append(
             Rename(
                 _relative(directory, source),
                 _relative(directory, target),
-                source.stat().st_size,
-                _sha256(source),
+                size,
+                digest,
             )
         )
     _validate_collisions(directory, renames)
     return Plan(str(directory), pattern, replacement, recursive, tuple(renames))
 
 
+def _validate_plan(plan: Plan) -> None:
+    if (
+        not isinstance(plan, Plan)
+        or not isinstance(plan.root, str)
+        or not Path(plan.root).is_absolute()
+    ):
+        raise ValueError("Manifest root must be an absolute local directory")
+    if (
+        type(plan.recursive) is not bool
+        or not isinstance(plan.pattern, str)
+        or not isinstance(plan.replacement, str)
+    ):
+        raise ValueError(
+            "Manifest pattern/replacement/recursive fields have invalid types"
+        )
+    if not isinstance(plan.renames, tuple) or len(plan.renames) > MAX_RECORDS:
+        raise ValueError("Manifest must contain at most 10,000 rename records")
+    for item in plan.renames:
+        if not isinstance(item, Rename):
+            raise TypeError("Invalid rename record")
+        typed_record(item.to_dict(), ("source", "target"))
+        root = no_links(Path(plan.root)).resolve()
+        inside(root, item.source)
+        inside(root, item.target)
+        portable_target(Path(item.target).name)
+        if Path(item.source).parent != Path(item.target).parent:
+            raise ValueError("Renames must preserve each file's original directory")
+        if item.source == item.target:
+            raise ValueError("Source and target must differ")
+
+
 def write_manifest(plan: Plan, output: Path) -> None:
-    destination = output.expanduser().resolve()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        raise ValueError("manifest output already exists")
-    destination.write_text(
-        json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8"
-    )
+    _validate_plan(plan)
+    content = json.dumps(plan.to_dict(), indent=2) + "\n"
+    if len(content.encode("utf-8")) > MAX_JSON:
+        raise ValueError("Rendered manifest exceeds 8 MiB")
+    target = destination(output)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    no_links(target)
+    with target.open("x", encoding="utf-8") as handle:
+        handle.write(content)
 
 
 def load_manifest(path: Path) -> Plan:
-    source = path.expanduser().resolve()
-    payload = json.loads(source.read_text(encoding="utf-8-sig"))
-    if payload.get("schema_version") != 1 or not isinstance(
-        payload.get("renames"), list
+    payload = read_json(path)
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get("schema_version")) is not int
+        or payload["schema_version"] != 1
+        or not isinstance(payload.get("renames"), list)
     ):
         raise ValueError("Unsupported or invalid rename manifest")
-    renames = tuple(
-        Rename(
-            str(item["source"]),
-            str(item["target"]),
-            int(item["size"]),
-            str(item["sha256"]),
-        )
-        for item in payload["renames"]
+    if len(payload["renames"]) > MAX_RECORDS:
+        raise ValueError("Manifest exceeds 10,000 records")
+    for item in payload["renames"]:
+        typed_record(item, ("source", "target"))
+    if not isinstance(payload.get("root"), str):
+        raise TypeError("Manifest root must be an absolute local directory")
+    plan = Plan(
+        payload["root"],
+        payload.get("pattern", ""),
+        payload.get("replacement", ""),
+        payload.get("recursive", False),
+        tuple(
+            Rename(item["source"], item["target"], item["size"], item["sha256"])
+            for item in payload["renames"]
+        ),
     )
-    return Plan(
-        str(payload["root"]),
-        str(payload.get("pattern", "")),
-        str(payload.get("replacement", "")),
-        bool(payload.get("recursive")),
-        renames,
-    )
+    _validate_plan(plan)
+    return plan
 
 
 def apply_plan(plan: Plan, journal: Path | None = None) -> None:
@@ -136,6 +208,7 @@ def undo_plan(plan: Plan, journal: Path | None = None) -> None:
 
 
 def _execute(plan: Plan, undo: bool, journal: Path | None = None) -> None:
+    _validate_plan(plan)
     _reject_symlinks(Path(plan.root).absolute())
     root = Path(plan.root).resolve()
     if not root.is_dir():
@@ -147,7 +220,9 @@ def _execute(plan: Plan, undo: bool, journal: Path | None = None) -> None:
     _validate_collisions(
         root, [Rename(a, b, item.size, item.sha256) for a, b, item in operations]
     )
-    occupied_sources = {source.casefold() for source, _, _ in operations}
+    occupied_sources = {
+        unicodedata.normalize("NFC", source).casefold() for source, _, _ in operations
+    }
     for source_name, target_name, item in operations:
         source = _inside(root, source_name)
         target = _inside(root, target_name)
@@ -157,9 +232,11 @@ def _execute(plan: Plan, undo: bool, journal: Path | None = None) -> None:
             raise ValueError(
                 f"Expected source file is missing or unsafe: {source_name}"
             )
-        if source.stat().st_size != item.size or _sha256(source) != item.sha256:
+        if hash_file(source) != (item.size, item.sha256):
             raise ValueError(f"File changed since the plan was created: {source_name}")
-        if target.exists() and target_name.casefold() not in occupied_sources:
+        if (target.exists() or target.is_symlink()) and unicodedata.normalize(
+            "NFC", target_name
+        ).casefold() not in occupied_sources:
             raise ValueError(f"Target already exists: {target_name}")
 
     journal_data: dict[str, Any] = {
@@ -182,7 +259,10 @@ def _execute(plan: Plan, undo: bool, journal: Path | None = None) -> None:
             for source, target, item in operations
         ],
     }
+    if len(json.dumps(journal_data, indent=2).encode("utf-8")) > MAX_JSON:
+        raise ValueError("Journal exceeds 8 MiB")
     if journal:
+        journal = destination(journal)
         if journal.resolve() in {
             _inside(root, n) for a, b, _ in operations for n in (a, b)
         }:
@@ -194,14 +274,24 @@ def _execute(plan: Plan, undo: bool, journal: Path | None = None) -> None:
             source = _inside(root, source_name)
             target = _inside(root, target_name)
             temporary = _inside(root, journal_data["operations"][index]["temporary"])
+            if temporary.exists() or temporary.is_symlink():
+                raise ValueError("Temporary staging path already exists")
+            if hash_file(source) != (
+                operations[index][2].size,
+                operations[index][2].sha256,
+            ):
+                raise ValueError("Source changed before staging")
             os.replace(source, temporary)
             staged.append((temporary, target, source))
             journal_data["operations"][index]["phase"] = "staged"
             if journal:
                 save_journal(journal, journal_data)
         for index, (temporary, target, _) in enumerate(staged):
-            if target.exists():
+            if target.exists() or target.is_symlink():
                 raise ValueError(f"Target appeared during staging: {target.name}")
+            expected = operations[index][2]
+            if hash_file(temporary) != (expected.size, expected.sha256):
+                raise ValueError("Staged file changed before commit")
             os.replace(temporary, target)
             journal_data["operations"][index]["phase"] = "committed"
             if journal:
@@ -210,10 +300,46 @@ def _execute(plan: Plan, undo: bool, journal: Path | None = None) -> None:
         if journal:
             save_journal(journal, journal_data)
     except (OSError, ValueError):
-        for temporary, target, original in reversed(staged):
-            current = temporary if temporary.exists() else target
-            if current.exists() and not original.exists():
-                os.replace(current, original)
+        # Clear every successfully committed target back to its recorded temporary
+        # before restoring originals, so a cycle cannot occupy another original.
+        rollback_complete = True
+        for index, (temporary, target, original) in reversed(list(enumerate(staged))):
+            item = operations[index][2]
+            try:
+                if not temporary.exists() and target.exists():
+                    if hash_file(target) != (item.size, item.sha256):
+                        rollback_complete = False
+                        continue
+                    os.replace(target, temporary)
+            except (OSError, ValueError):
+                rollback_complete = False
+        for index, (temporary, target, original) in reversed(list(enumerate(staged))):
+            item = operations[index][2]
+            try:
+                if (
+                    temporary.exists()
+                    and not original.exists()
+                    and not original.is_symlink()
+                ):
+                    if hash_file(temporary) != (item.size, item.sha256):
+                        rollback_complete = False
+                        continue
+                    os.replace(temporary, original)
+                if not original.exists() or hash_file(original) != (
+                    item.size,
+                    item.sha256,
+                ):
+                    rollback_complete = False
+                else:
+                    journal_data["operations"][index]["phase"] = "rolled-back"
+            except (OSError, ValueError):
+                rollback_complete = False
+        journal_data["status"] = "rolled-back" if rollback_complete else "interrupted"
+        if journal:
+            try:
+                save_journal(journal, journal_data)
+            except (OSError, ValueError):
+                pass  # Original I/O error remains primary; inspection uses hashes.
         raise
 
 
@@ -243,18 +369,11 @@ def _validate_collisions(root: Path, renames: list[Rename]) -> None:
 
 
 def _reject_symlinks(path: Path) -> None:
-    # Inspect the supplied spelling before resolve() can erase symlink evidence.
-    if any(part.is_symlink() for part in (path, *path.parents)):
-        raise ValueError("Manifest paths must not use a symlink or symlink ancestor")
+    no_links(path)
 
 
 def _inside(root: Path, relative: str) -> Path:
-    lexical = root / relative
-    _reject_symlinks(lexical)
-    target = lexical.resolve()
-    if target != root and root not in target.parents:
-        raise ValueError(f"Manifest path leaves its root: {relative}")
-    return target
+    return inside(root, relative)
 
 
 def _relative(root: Path, path: Path) -> str:
@@ -262,8 +381,4 @@ def _relative(root: Path, path: Path) -> str:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return hash_file(path)[1]
